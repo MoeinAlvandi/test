@@ -1,0 +1,240 @@
+USE [naft8055]
+GO
+/****** Object:  StoredProcedure [Att].[uspGetCompeletePresentAbsentNew]    Script Date: 8/12/2023 3:13:03 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER Procedure [Att].[uspGetCompeletePresentAbsentNew]
+
+@sdate      varchar(10)
+,@edate     varchar(10)
+,@st        float
+,@et        float
+,@AoutoPair int=1
+as
+set nocount on
+ 
+Create table #State(r int,personelid int,date varchar(10),vdate varchar(10),starttime smalldatetime,endtime smalldatetime,kind varchar(1),IST int,IET int,creditcode int)
+
+
+
+declare @s float,@e int
+,@sdayid int,@edayid int
+,@sdate1 varchar(10), @edate1  varchar(10)
+,@Today Datetime=GetDate()
+
+select @sdayid=dayid from gnr.Days where shDATE=@sdate
+select @edayid=dayid from gnr.Days where shDATE=@edate
+select DayID,shdate shdate,Mdate,DOW,DOWTitle
+into #days from gnr.Days where DayID between @sdayid-5 and @edayid+1
+
+select @sdate1=shdate from #days where DayID=@sdayid-1
+select @edate1=shdate from #days where DayID=@edayid+1
+select @s=@st*60,@e=@et*60+case when @et<=@st then 1440 else 0 end
+
+declare @EndTimeMDate datetime=dateAdd(MINUTE,@e,Gnr.ShamsiToMiladi(@edate))
+
+ 
+;with a as(select 0 r,pds.personelid,pds.DATE,dc.normalstart,dc.normalend
+,pds.Name Structure  , pds.StructureID 
+from att.PersonDateStructure pds 
+join att.DetailCollection dc on dc.DetailCollectionID=pds.DetailCollectionID and dc.StructureID=pds.StructureID 
+where pds.date between @sdate1 and @edate1 
+and exists(select 1 from #SelectedPerson SP where Pds.PersonelID=Sp.Personid)
+)
+select a.*,DATEADD(MINUTE,normalstart,d.Mdate) ns,DATEADD(MINUTE,normalend,d.Mdate) ne
+,DATEADD(MINUTE,@s,d.Mdate) mstart,DATEADD(MINUTE,@e,d.Mdate) mend,d.mdate
+ into #pds from a join #days d on a.date=d.shdate
+ update #pds set mstart=ns,mend=ne where mstart is null
+ 
+select 0 r,personelid,date,DATEADD(MINUTE,vstarttime,d.Mdate) starttime,DATEADD(MINUTE,endtime,d.Mdate) endtime,space(10) sdate,space(10) edate,SAttID SID,EAttID EID 
+into #pair 
+from att.PairedAttendnce pa join #days d on d.SHDate=pa.date
+where pa.date between @sdate1 and @edate1 
+and exists(select 1 from #SelectedPerson SP where Pa.PersonelID=Sp.Personid) 
+ 
+;with c as(
+select c.personelid,pds.date,starttime,endtime,c.Code  
+from att.Credit c
+join #pds pds on pds.personelid=c.PersonelID and pds.date between StartDate and enddate
+ where  exists(select 1 from #SelectedPerson SP where C.PersonelID=Sp.Personid)
+ and @sdate<=c.EndDate and @edate>=c.startdate 
+ and not(starttime=0 and endtime=0) and c.StatusID=203
+union
+select c.personelid,pds.date,pds.NormalStart starttime,pds.NormalEnd endtime,c.Code 
+from att.Credit c
+join #pds pds on pds.personelid=c.PersonelID and pds.date between StartDate and enddate
+ where  exists(select 1 from #SelectedPerson SP where C.PersonelID=Sp.Personid)
+ and @sdate<=c.EndDate and @edate>=c.startdate 
+ and starttime=0 and endtime=0 and pds.normalstart is not null and c.StatusID=203
+)
+select c.*,DATEADD(minute,c.starttime,d.mdate) st,DATEADD(minute,c.endtime,d.mdate) et ,0 IsMission
+into #credit 
+from c join #days d on d.shdate=c.date
+
+
+exec gnr.UspGetMissionList @sdate,@edate,@st,@et,@AoutoPair 
+
+
+ 
+
+;with a as(select personelid,DATEADD(MINUTE,time,d.Mdate) time,type ,d.Mdate
+from att.Attendance a 
+join #days d on d.SHDate=a.date
+where a.date between @sdate1 and @edate1 
+and exists(select 1 from #SelectedPerson SP where a.PersonelID=Sp.Personid)
+and cast(DATEADD(MINUTE,time,d.Mdate) as date)>=cast(@Today-1 as date) 
+) 
+update #pair set endtime =DATEADD(MINUTE,@e,d.Mdate)
+from #pair P 
+join #days d on P.date=d.shdate
+where endtime is null and cast(starttime as date)>=cast(@Today-1 as date)
+and not exists(select * from a a1 where a1.personelid=P.PersonelID and a1.time>P.starttime)
+ 
+   
+
+if @AoutoPair=1
+begin
+	;with a as(select DATEADD(MINUTE,at.time,d.Mdate) t,* from att.Attendance at join #days d on d.shdate=at.date)
+	select 0 r,PersonelID,t,type,AttendanceID,date 
+	Into #tmpAtt from a
+	where exists(select 1 from #SelectedPerson SP where a.PersonelID=Sp.Personid)
+	and DATE between @sdate1 and @edate1
+	and not exists(select 1 from #pair p where p.PersonelID=a.PersonelID and not(p.SID<>a.AttendanceID and p.EID<>a.AttendanceID))
+	and not exists(select 1 from #pair p where p.PersonelID=a.PersonelID and not(starttime<a.t and endtime<a.t))
+
+	update #pair set endtime=t,EID=attendanceid 
+	from #tmpAtt t1 where #pair.personelid=t1.PersonelID and DATEDIFF(day,#pair.starttime,t1.t)<=1 
+	and isnull(t1.type,2)%2=0 and  not exists(select 1 from #tmpAtt t2 where t1.PersonelID=t2.PersonelID and t1.t>t2.t)
+
+
+	delete from #tmpatt where exists(select 1 from #pair p where p.PersonelID=#tmpatt.PersonelID and p.EID=#tmpatt.AttendanceID )
+	delete from #tmpatt where exists(select 1 from #tmpatt p where p.PersonelID=#tmpatt.PersonelID and p.AttendanceID<#tmpatt.AttendanceID and ISNULL(isnull(p.type,#tmpatt.type),0)=ISNULL(ISNULL(#tmpatt.type,p.type),0) and DATEDIFF(minute,p.t,#tmpatt.t)<=3 )
+
+	;with a as(select ROW_NUMBER() over(partition by personelid order by personelid,t)r1,* from #tmpatt)
+	update a set r=r1
+
+	insert #pair
+	select 0 r,t1.PersonelID,t1.date ,t1.t s,t2.t e,t1.Date,t2.date,t1.AttendanceID sid,t2.AttendanceID eid from #tmpatt t1
+	join #tmpatt t2 on t1.PersonelID=t2.PersonelID and t1.r=t2.r-1
+	where ISNULL(t1.type,1)%2=1 and ISNULL(t2.type,2)%2=0 and t1.r%2=1
+	and DATEDIFF(day,t1.t,t2.t)<=1
+end
+ 
+
+
+;with a as(select ROW_NUMBER() over(partition by personelid order by personelid,date,starttime) r1,* from #pair)
+update a set r=r1
+update #pair set sdate=(select shdate from #days where CAST(mdate as date)=CAST(starttime as date))
+update #pair set edate=(select shdate from #days where CAST(mdate as date)=CAST(endtime as date))
+
+;with a as(
+select personelid,starttime time from #pair
+union
+select personelid,endtime time from #pair
+union
+select personelid,ns from #pds
+union
+select personelid,ne from #pds
+union
+select personelid,mstart  from #pds
+union
+select personelid,mend from #pds
+union
+select personelid,st  from #credit
+union
+select personelid,et  from #credit 
+union
+select personelid,mdate  from #pds
+)
+,
+b as(select ROW_NUMBER() over(partition by personelid order by personelid,time) r,* from a where time is not null)
+insert #State
+select b1.r,b1.PersonelID,'' date,'' vdate,b1.time ,b2.time etime,' ' kind,0,0,0 
+from b b1 
+join b b2
+on b1.PersonelID =b2.PersonelID and b1.r=b2.r-1
+where exists(select 1 from #pds p where p.personelid=b1.personelid and b1.time between p.mstart and p.mend and b2.time between p.mstart and p.mend)
+and b1.time<=@Today
+order by PersonelID,r
+  
+update #State set endtime =@Today where endtime>@Today
+update #State set vdate=(select shdate from #days where Mdate=CAST(#state.starttime as date))
+update #State set date=vdate
+ 
+update #State set kind='-' 
+where exists(select 1 from #pair p where personelid=#State.personelid and #state.starttime between p.starttime and isnull(p.endtime,@EndTimeMDate)  and #state.endtime between p.starttime and isnull(p.endtime,@EndTimeMDate) )
+and exists(select 1 from #pds p where p.personelid=#State.personelid and #state.starttime between p.ns and p.ne  and #state.endtime between p.ns and p.ne )
+
+update #State set kind='O' 
+where exists(select 1 from #pair p where personelid=#State.personelid and #state.starttime between p.starttime and isnull(p.endtime,@EndTimeMDate)  and #state.endtime between p.starttime and isnull(p.endtime,@EndTimeMDate) )
+and not exists(select 1 from #pds p where p.personelid=#State.personelid and #state.starttime between p.ns and p.ne  and #state.endtime between p.ns and p.ne )
+
+update #State set kind='A' 
+where not exists(select * from #pair p where personelid=#State.personelid and #state.starttime between p.starttime and isnull(p.endtime,@EndTimeMDate)  and #state.endtime between p.starttime and isnull(p.endtime,@EndTimeMDate) )
+and exists(select 1 from #pds p where p.personelid=#State.personelid and #state.starttime between p.ns and p.ne  and #state.endtime between p.ns and p.ne )
+and not exists(select 1 from #Credit p where p.personelid=#State.personelid and #state.starttime between p.st and p.et  and #state.endtime between p.st and p.et )
+
+;with a as(select s.*,p.code from #State s join #credit p on p.personelid=s.personelid and s.starttime between p.st and p.et  and s.endtime between p.st and p.et) 
+update a set kind=case when code IN(11001,11002) then 'H' when code=11032 then 'M' else 'C' end 
+where not exists(select 1 from #pair p where personelid=a.personelid and a.starttime between p.starttime and isnull(p.endtime,@EndTimeMDate)  and a.endtime between p.starttime and isnull(p.endtime,@EndTimeMDate) )
+and exists(select 1 from #pds p where p.personelid=a.personelid and a.starttime between p.ns and p.ne  and a.endtime between p.ns and p.ne )
+
+update #state set IST=DATEPART(hour,starttime)*60+DATEPART(minute,starttime),IET=DATEPART(hour,endtime)*60+DATEPART(minute,endtime)+1440*(DATEDIFF(DAY,starttime,endtime))
+update #state set creditcode=(select top 1 code from #credit c where c.PersonelID=#state.personelid and #state.starttime between c.st and c.et  )
+
+if  (  OBJECT_ID('tempdb..#TbTime')is not null) 
+Begin
+	;with a as(
+	select starttime time from #pair
+	union
+	select endtime time from #pair
+	union
+	select st time from #credit
+	union
+	select et time from #credit
+	)
+	Insert #TbTime([time])
+	Select [time] from a
+End	
+
+Declare @TbCode Table (CodeID int, Codename nvarchar(500))
+Insert @TbCode(CodeID, Codename)
+Select	CodeID, CodeName
+from Att.Code
+union
+Select	CodeID, CodeName
+From Scr.Code as C
+Where systemID=81
+	and exists(select 1 from scr.CodeGroupCode cg inner join scr.GroupCode gc on cg.GroupCodeID=gc.CodeGroupID
+				where gc.CodeGroupAcronym='MissionCode' and c.CodeID = cg.CodeID)
+
+insert #TbState(r ,personelid ,date ,vdate ,starttime ,endtime ,kind ,IST ,IET ,creditcode, 
+						Structure , StructureID , AttendanceStr , CreditStr , DepartmentName ,DepartmentID
+						,ns ,ne ,mstart ,mende )
+select   s.r ,s.personelid,s.[date], s.vdate, s.starttime, s.endtime, s.kind ,s.IST, s.IET,
+(select stuff((select ','+convert(varchar(30),c.CodeID) 
+				   from #credit cr inner join @TbCode c on cr.code=c.CodeID 
+				   where cr.PersonelID=s.personelid and cr.date=s.date
+				   for xml path('')),1,1,''
+				 ))CreditCode,
+p.Structure, p.StructureID
+,case when p.date<>b.sdate then '<' else '(' end+cast(cast(b.starttime as time) as varchar(5))+' '+cast(cast(b.endtime as time) as varchar(5))+case when p.date<>b.sdate then '> ' else ')' end
++isnull(case when p.date<>b1.sdate then '<' else '(' end+cast(cast(b1.starttime as time) as varchar(5))+' '+cast(cast(b1.endtime as time) as varchar(5))+case when p.date<>b1.sdate then '>' else ')' end,'')
++isnull(case when p.date<>b2.sdate then '<' else '(' end+cast(cast(b2.starttime as time) as varchar(5))+' '+cast(cast(b2.endtime as time) as varchar(5))+case when p.date<>b2.sdate then '>' else ')' end,'')  AttendanceStr,
+(select stuff((select ','+c.CodeName 
+				   from #credit cr inner join @TbCode c on cr.code=c.CodeID 
+				   where cr.PersonelID=s.personelid and cr.date=s.date
+				   for xml path('')),1,1,''
+				 ))CreditStr ,
+(select D.Name from pub.Department D where D.DepartmentID=DL.dept)DepartmentName,DL.dept DepartmentID
+,p.ns,p.ne,p.mstart ,p.mend   
+from #state s
+join #pds p on p.personelid=s.personelid and p.date=s.date
+join gnr.DeptLevel DL on  DL.OwnDept=1 and DL.Personid=s.personelid
+left join #pair b on p.personelid=b.PersonelID and not(b.starttime not between p.mstart and p.mend and b.endtime not between p.mstart and p.mend) and b.r=1
+left join #pair b1 on p.personelid=b1.PersonelID and not(b1.starttime not between p.mstart and p.mend and b1.endtime not between p.mstart and p.mend)  and b1.r=2
+left join #pair b2 on p.personelid=b2.PersonelID and not(b2.starttime not between p.mstart and p.mend and b2.endtime not between p.mstart and p.mend)  and b2.r=3
+where P.date between @sdate and @edate And s.starttime<>s.endtime
+order by personelid,starttime
